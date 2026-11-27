@@ -108,14 +108,6 @@ h2{font-size:15px;margin:0 0 8px}
       <ul class="lista" id="lista"></ul>
       <div id="vazio" class="msg" style="color:var(--sub)">Nenhuma batida ainda.</div>
     </div>
-    <div class="card oculto" id="admin">
-      <h2>Local do escritório</h2>
-      <div id="localAtual" class="msg" style="margin:0 0 8px;color:var(--sub)"></div>
-      <label for="raio">Raio permitido (metros)</label>
-      <input id="raio" type="number" min="30" max="1000" value="150">
-      <button id="cadLocal" class="sec">📍 Cadastrar este local (estou no escritório agora)</button>
-      <div id="msgAdmin" class="msg"></div>
-    </div>
     </div>
     <div id="abaFolha" class="oculto">
       <div class="nav"><button id="fAnt" aria-label="Folha anterior">◀</button><div class="tt"><b id="fTitulo"></b><span id="fPeriodo"></span></div><button id="fProx" aria-label="Próxima folha">▶</button></div>
@@ -141,8 +133,9 @@ const FIREBASE_CONFIG = {
 const FUSO = "America/Sao_Paulo";
 const TIPOS = [["entrada", "Entrada"], ["saida_almoco", "Saída almoço"], ["volta_almoco", "Volta almoço"], ["saida", "Saída"]];
 const MOTIVOS = ["Home Office", "Vistorias", "Viagem"];
-const PRECISAO_MAX = 150;   // metros: acima disso o sinal de GPS é fraco demais para validar
-const RAIO_PADRAO = 150;
+const PRECISAO_MAX = 30;    // metros: acima disso o sinal de GPS é fraco demais para validar
+// Local FIXO para todos (Landmark Nações Unidas, Av. das Nações Unidas 12399). Não se cadastra pelo site.
+const ESCRITORIO = { lat: -23.6071, lng: -46.6968, raio: 5, nome: "Landmark Nações Unidas" };
 
 const DEMO = new URLSearchParams(location.search).has("demo");
 const ALMOCO_MIN = 60;                 // horas = saída − entrada − 1 h (igual ao app Jornada)
@@ -181,8 +174,6 @@ async function criarBackendReal() {
     login: (e, s) => A.signInWithEmailAndPassword(auth, e, s),
     logout: () => A.signOut(auth),
     async perfil(uid) { const s = await F.getDoc(F.doc(db, "usuarios", uid)); return s.exists() ? s.data() : null; },
-    async config() { const s = await F.getDoc(F.doc(db, "config", "ponto")); return s.exists() ? s.data() : null; },
-    salvarConfig: (c) => F.setDoc(F.doc(db, "config", "ponto"), c),
     async recentes(uid) {
       const q = F.query(col(uid), F.orderBy("criado_em", "desc"), F.limit(40));
       return mesclarManuais((await F.getDocs(q)).docs.map((d) => ({ id: d.id, ...d.data(), criado_em: d.data().criado_em?.toDate?.() })), null, null);
@@ -196,7 +187,7 @@ async function criarBackendReal() {
   };
 }
 function criarBackendDemo() {
-  let usuario = null, cfg = { lat: -23.6, lng: -46.7, raio: 150 }, batidas = [], ouvinte = null;
+  let usuario = null, batidas = [], ouvinte = null;
   const FOTO = "data:image/svg+xml;utf8," + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' width='320' height='200'><rect width='320' height='200' fill='#9db4c8'/><rect x='110' y='50' width='100' height='150' fill='#5d7a93'/><text x='160' y='30' font-size='18' text-anchor='middle' fill='#fff'>foto da entrada</text></svg>");
   for (let k = 1; k <= 40; k++) {                       // histórico fictício (só no modo demonstração)
     const d = new Date(Date.now() - k * 86400000), w = d.getUTCDay(); if (w === 0 || w === 6) continue;
@@ -211,8 +202,6 @@ function criarBackendDemo() {
     login: async () => { usuario = { uid: "demo", email: "demo@agi" }; ouvinte(usuario); },
     logout: async () => { usuario = null; ouvinte(null); },
     perfil: async () => ({ nome: "Usuário Demo", area: "TI", status: "aprovado" }),
-    config: async () => cfg,
-    salvarConfig: async (c) => { cfg = c; },
     recentes: async () => [...batidas].reverse(),
     bater: async (uid, d) => { const b = { id: String(batidas.length), ...d, criado_em: new Date() }; batidas.push(b); return b; },
     _batidas: () => batidas,
@@ -220,7 +209,8 @@ function criarBackendDemo() {
 }
 
 /* ============ APP ============ */
-let B, usuario = null, perfil = null, escritorio = null, hojeLista = [];
+let B, usuario = null, perfil = null, hojeLista = [];
+const escritorio = ESCRITORIO;
 
 function mostrar(tela) {
   $("telaLogin").classList.toggle("oculto", tela !== "login");
@@ -264,14 +254,11 @@ function desenhar() {
     li.append(esq, tag); ul.appendChild(li);
   }
   $("vazio").classList.toggle("oculto", hojeLista.length > 0);
-  $("localAtual").textContent = escritorio
-    ? `Cadastrado: ${escritorio.lat.toFixed(5)}, ${escritorio.lng.toFixed(5)} · raio ${escritorio.raio} m`
-    : "Nenhum local cadastrado ainda: o GPS não consegue validar até alguém cadastrar.";
 }
 
 /* ---- folha de confirmação ---- */
 let S = null;   // {tipo, metodo, gps, avaliacao, foto, motivo, texto, msg, ocupado}
-function abrirFolha(tipo) { S = { tipo, metodo: ALMOCO.includes(tipo) ? "simples" : null, gps: null, aval: null, foto: null, motivo: "", texto: "", msg: "", ocupado: false }; renderFolha(); $("fundo").classList.remove("oculto"); }
+function abrirFolha(tipo) { S = { tipo, metodo: ALMOCO.includes(tipo) ? "simples" : null, gps: null, aval: null, foto: null, motivo: "", texto: "", msg: "", ocupado: false }; if (!ALMOCO.includes(tipo)) aquecerGps(); renderFolha(); $("fundo").classList.remove("oculto"); }
 function fecharFolha() { S = null; $("fundo").classList.add("oculto"); }
 $("fundo").addEventListener("click", (e) => { if (e.target === $("fundo") && !S?.ocupado) fecharFolha(); });
 
@@ -308,10 +295,10 @@ function renderFolha() {
     if (S.metodo === "gps") {
       const a = S.aval;
       if (!a) add("div", { className: "msg", textContent: "Pegando sua localização…" });
-      else if (a.ok) add("div", { className: "msg ok", textContent: `✓ Você está no escritório (a ${fmtDist(a.dist)} do ponto cadastrado).` });
+      else if (a.ok) add("div", { className: "msg ok", textContent: `✓ Você está no escritório (a ${fmtDist(a.dist)} do local).` });
       else add("div", { className: "msg erro", textContent: a.motivo === "fraco"
         ? `Sinal de GPS fraco (±${Math.round(S.gps.precisao)} m). Vá para perto de uma janela e tente de novo, ou use outra opção.`
-        : `Você está a ${fmtDist(a.dist)} do escritório, fora do raio permitido.` });
+        : `Você está a ${fmtDist(a.dist)} do escritório, fora do raio permitido (${escritorio.raio} m).` });
     }
     if (S.metodo === "foto" && S.foto) {
       add("div", { className: "msg ok", textContent: "✓ Foto anexada." });
@@ -340,18 +327,36 @@ function renderFolha() {
   }
 }
 
-function usarGps() {
+// GPS rápido: o aparelho começa a procurar sinal assim que a folha abre (enquanto a pessoa escolhe como confirmar)
+// e a leitura termina assim que a precisão ficar boa (ou no máximo em 8 s, usando a melhor que veio).
+let preGps = null;
+function obterPosicao({ alvo = 15, limite = 8000 } = {}) {
+  return new Promise((ok, erro) => {
+    let melhor = null, id = null, fim = false, t = null;
+    const parar = (fn, v) => { if (fim) return; fim = true; clearTimeout(t); navigator.geolocation.clearWatch(id); fn(v); };
+    t = setTimeout(() => parar(melhor ? ok : erro, melhor || { code: 3 }), limite);
+    id = navigator.geolocation.watchPosition((p) => {
+      if (!melhor || p.coords.accuracy < melhor.precisao) melhor = { lat: p.coords.latitude, lng: p.coords.longitude, precisao: p.coords.accuracy };
+      if (p.coords.accuracy <= alvo) parar(ok, melhor);
+    }, (e) => { if (e.code === 1) parar(erro, e); },
+    { enableHighAccuracy: true, maximumAge: 0, timeout: limite });
+  });
+}
+function aquecerGps() { if (navigator.geolocation) { preGps = obterPosicao(); preGps.catch(() => {}); } }
+async function usarGps() {
   S.metodo = "gps"; S.aval = null; S.gps = null; S.msg = ""; renderFolha();
-  if (!escritorio) { S.aval = { ok: false, motivo: "semlocal", dist: 0 }; S.msg = "O local do escritório ainda não foi cadastrado. Use foto ou outro motivo."; renderFolha(); return; }
   if (!navigator.geolocation) { S.aval = { ok: false, motivo: "fraco", dist: 0 }; S.gps = { precisao: 9999 }; S.msg = "Este aparelho não oferece localização."; renderFolha(); return; }
-  navigator.geolocation.getCurrentPosition((p) => {
-    S.gps = { lat: p.coords.latitude, lng: p.coords.longitude, precisao: p.coords.accuracy };
-    S.aval = avaliarLocal(S.gps, escritorio); renderFolha();
-  }, (e) => {
+  const mine = S;
+  try {
+    const p = await (preGps || obterPosicao()); preGps = null;
+    if (S !== mine) return;
+    S.gps = p; S.aval = avaliarLocal(p, escritorio); renderFolha();
+  } catch (e) {
+    preGps = null; if (S !== mine) return;
     S.gps = { precisao: 9999 }; S.aval = { ok: false, motivo: "fraco", dist: 0 };
-    S.msg = e.code === 1 ? "Localização bloqueada. Libere a permissão do site no navegador ou use outra opção." : "Não consegui pegar a localização. Tente de novo.";
+    S.msg = e && e.code === 1 ? "Localização bloqueada. Libere a permissão do site no navegador ou use outra opção." : "Não consegui pegar a localização. Tente de novo.";
     renderFolha();
-  }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+  }
 }
 
 // foto: reduz e guarda dentro do próprio registro (não precisa de Storage)
@@ -521,17 +526,6 @@ function aba(qual) {
 }
 $("tabBater").onclick = () => aba("bater"); $("tabFolha").onclick = () => aba("folha");
 
-/* ---- admin: cadastrar local ---- */
-$("cadLocal").onclick = () => {
-  $("msgAdmin").className = "msg"; $("msgAdmin").textContent = "Pegando localização…";
-  navigator.geolocation.getCurrentPosition(async (p) => {
-    if (p.coords.accuracy > PRECISAO_MAX) { $("msgAdmin").className = "msg erro"; $("msgAdmin").textContent = `Sinal fraco (±${Math.round(p.coords.accuracy)} m). Tente perto de uma janela.`; return; }
-    const c = { lat: p.coords.latitude, lng: p.coords.longitude, raio: Math.max(30, Math.min(1000, +$("raio").value || RAIO_PADRAO)), nome: "Escritório" };
-    try { await B.salvarConfig(c); escritorio = c; desenhar(); $("msgAdmin").className = "msg ok"; $("msgAdmin").textContent = "✓ Local cadastrado."; }
-    catch { $("msgAdmin").className = "msg erro"; $("msgAdmin").textContent = "Sem permissão para cadastrar o local."; }
-  }, () => { $("msgAdmin").className = "msg erro"; $("msgAdmin").textContent = "Localização bloqueada no navegador."; }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
-};
-
 /* ---- login ---- */
 $("entrar").onclick = async () => {
   $("msgLogin").textContent = ""; $("entrar").disabled = true;
@@ -554,9 +548,7 @@ async function iniciar() {
     try {
       perfil = await B.perfil(u.uid);
       if (!perfil || perfil.status !== "aprovado") { await B.logout(); mostrar("login"); $("msgLogin").textContent = "Seu acesso ainda não foi aprovado no AGI ERP."; return; }
-      escritorio = await B.config().catch(() => null);
       $("quem").textContent = perfil.nome || u.email;
-      $("admin").classList.toggle("oculto", perfil.area !== "TI");
       mostrar("ponto"); aba("bater"); await carregar();
     } catch { mostrar("login"); $("msgLogin").textContent = "Não consegui carregar seus dados. Tente de novo."; }
   });

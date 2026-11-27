@@ -185,12 +185,9 @@ async function criarBackendReal() {
     salvarConfig: (c) => F.setDoc(F.doc(db, "config", "ponto"), c),
     async recentes(uid) {
       const q = F.query(col(uid), F.orderBy("criado_em", "desc"), F.limit(40));
-      return (await F.getDocs(q)).docs.map((d) => ({ id: d.id, ...d.data(), criado_em: d.data().criado_em?.toDate?.() }));
+      return mesclarManuais((await F.getDocs(q)).docs.map((d) => ({ id: d.id, ...d.data(), criado_em: d.data().criado_em?.toDate?.() })), null, null);
     },
-    async periodo(uid, de, ate) {
-      const q = F.query(col(uid), F.where("criado_em", ">=", F.Timestamp.fromDate(de)), F.where("criado_em", "<", F.Timestamp.fromDate(ate)), F.orderBy("criado_em"));
-      return (await F.getDocs(q)).docs.map((d) => ({ id: d.id, ...d.data(), criado_em: d.data().criado_em.toDate() }));
-    },
+    periodo: (uid, de, ate) => docsPeriodo(F, col(uid), de, ate),
     async bater(uid, dados) {
       const ref = await F.addDoc(col(uid), { ...dados, uid, criado_em: F.serverTimestamp() });
       const s = await F.getDoc(ref);                       // devolve o horário gravado pelo servidor
@@ -417,13 +414,36 @@ function montarDias(batidas) {
   }
   return out;
 }
+// Horários lançados à mão no app (metodo "app") valem pela hora digitada (data_hora), não pela do envio.
+// Ponto batido de verdade no mesmo dia/tipo sempre vence; entre manuais vale o último enviado.
+function mesclarManuais(lista, de, ate) {
+  const reais = new Set(lista.filter((b) => b.metodo !== "app" && b.criado_em).map((b) => chaveDia(b.criado_em) + b.tipo));
+  const ult = new Map();
+  for (const b of lista) {
+    if (b.metodo !== "app") continue;
+    const ef = b.data_hora?.toDate?.(); if (!ef) continue;
+    if (de && (ef < de || ef >= ate)) continue;
+    const k = chaveDia(ef) + b.tipo; if (reais.has(k)) continue;
+    const x = { ...b, registrado_em: b.criado_em, criado_em: ef };
+    const o = ult.get(k); if (!o || x.registrado_em > o.registrado_em) ult.set(k, x);
+  }
+  return [...lista.filter((b) => b.metodo !== "app"), ...ult.values()].sort((a, b) => a.criado_em - b.criado_em);
+}
+async function docsPeriodo(F, ref, de, ate) {   // pontos reais (criado_em) + manuais do app (data_hora)
+  const T = F.Timestamp.fromDate;
+  const q = (campo) => F.getDocs(F.query(ref, F.where(campo, ">=", T(de)), F.where(campo, "<", T(ate)), F.orderBy(campo)));
+  const [a, b] = await Promise.all([q("criado_em"), q("data_hora")]);
+  const m = new Map(); [...a.docs, ...b.docs].forEach((d) => m.set(d.id, d));
+  return mesclarManuais([...m.values()].map((d) => ({ id: d.id, ...d.data(), criado_em: d.data().criado_em?.toDate?.() })), de, ate);
+}
 function origemTxt(b) {
   if (b.metodo === "gps") return `📍 Proximidade${b.distancia != null ? ` (a ${b.distancia} m do escritório)` : ""}`;
   if (b.metodo === "foto") return "📷 Foto da entrada";
   if (b.metodo === "justificativa") return `✍️ Justificativa: ${b.justificativa || "—"}`;
+  if (b.metodo === "app") return "✍️ Lançado manualmente no app (sem local nem foto)";
   return "";
 }
-const origemCurta = (b) => b.metodo === "gps" ? "📍 proximidade" : b.metodo === "foto" ? "📷 foto" : b.metodo === "justificativa" ? `✍️ ${b.justificativa || "justificado"}` : "";
+const origemCurta = (b) => b.metodo === "gps" ? "📍 proximidade" : b.metodo === "foto" ? "📷 foto" : b.metodo === "justificativa" ? `✍️ ${b.justificativa || "justificado"}` : b.metodo === "app" ? "✍️ manual (app)" : "";
 function blocosFolha(f, mapa) {
   const out = []; let atual = null;
   const [ya, ma, da] = f.iniK.split("-").map(Number), [yb, mb, db] = f.fimK.split("-").map(Number);
